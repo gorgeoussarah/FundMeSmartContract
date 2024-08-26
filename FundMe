@@ -1,0 +1,114 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+// Importing Chainlink's AggregatorV3Interface, used to interact with a price feed contract.
+import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
+
+// Library to handle price conversions, specifically converting ETH amounts to USD.
+// A library is used because it provides reusable functions without needing to store any state.
+library PriceConverter {
+
+    // Function to get the latest ETH/USD price from the Chainlink price feed.
+    // Returns the price with 18 decimal places.
+    function getPrice() internal view returns (uint256) {
+        // Address of the Chainlink ETH/USD price feed on Sepolia network.
+        AggregatorV3Interface priceFeed = AggregatorV3Interface(
+            0xfEefF7c3fB57d18C5C6Cdd71e45D2D0b4F9377bF
+        );
+        // Fetch the latest price data from the price feed.
+        (, int256 answer, , , ) = priceFeed.latestRoundData();
+        // Convert the price to a 18-decimal format and return it.
+        return uint256(answer * 1e10);
+    }
+
+    // Function to convert a given amount of ETH to its equivalent in USD.
+    // Uses the current ETH/USD price to perform the conversion.
+    function getConversionRate(
+        uint256 ethAmount
+    ) internal view returns (uint256) {
+        uint256 ethPrice = getPrice(); // Get the latest ETH price in USD.
+        // Calculate and return the ETH amount in USD, considering 18 decimals.
+        uint256 ethAmountInUsd = (ethPrice * ethAmount) / 1e18;
+        return ethAmountInUsd;
+    }
+}
+
+// Custom error for when a function is called by someone other than the contract owner.
+error NotOwner();
+
+// Contract that allows users to fund it with ETH, which the owner can later withdraw.
+contract FundMe {
+    // Attach the PriceConverter library to uint256 type, so its functions can be called on uint256 variables.
+    using PriceConverter for uint256;
+
+    // Mapping to track how much ETH each address has funded.
+    mapping(address => uint256) public addressToAmountFunded;
+    // Array to store the list of funders' addresses.
+    address[] public funders;
+
+    // Variable to store the owner of the contract, who can withdraw funds.
+    // It is immutable, meaning it can only be set once during deployment.
+    address public /* immutable */ i_owner;
+    // Constant representing the minimum USD amount required to fund the contract.
+    uint256 public constant MINIMUM_USD = 5 * 10 ** 18;
+
+    // Constructor that sets the contract's deployer as the owner.
+    constructor() {
+        i_owner = msg.sender;
+    }
+
+    // Function that allows users to fund the contract with ETH.
+    // Requires that the ETH sent is worth at least the minimum USD amount.
+    function fund() public payable {
+        // Ensure that the ETH sent is worth at least MINIMUM_USD.
+        require(msg.value.getConversionRate() >= MINIMUM_USD, "You need to spend more ETH!");
+        // Record the funding amount for the sender's address.
+        addressToAmountFunded[msg.sender] += msg.value;
+        // Add the sender's address to the list of funders.
+        funders.push(msg.sender);
+    }
+
+    // Function to retrieve the version of the price feed being used.
+    function getVersion() public view returns (uint256) {
+        // Create an instance of the price feed.
+        AggregatorV3Interface priceFeed = AggregatorV3Interface(0xfEefF7c3fB57d18C5C6Cdd71e45D2D0b4F9377bF);
+        // Return the version of the price feed.
+        return priceFeed.version();
+    }
+
+    // Modifier to restrict access to certain functions to only the owner of the contract.
+    modifier onlyOwner() {
+        // Revert the transaction if the caller is not the owner.
+        if (msg.sender != i_owner) revert NotOwner();
+        _;
+    }
+
+    // Function to withdraw all funds from the contract, only callable by the owner.
+    function withdraw() public onlyOwner {
+        // Loop through the list of funders.
+        for (uint256 funderIndex = 0; funderIndex < funders.length; funderIndex++) {
+            // Get the address of each funder.
+            address funder = funders[funderIndex];
+            // Reset the amount funded by each funder to zero.
+            addressToAmountFunded[funder] = 0;
+        }
+        // Reset the funders array to an empty array.
+        funders = new address[](0);
+
+        // Transfer the entire contract balance to the owner using the `call` method.
+        (bool callSuccess,) = payable(msg.sender).call{value: address(this).balance}("");
+        // Revert the transaction if the transfer fails.
+        require(callSuccess, "Call failed");
+    }
+
+    // Fallback function that is triggered when the contract receives ETH with data that does not match any function.
+    fallback() external payable {
+        fund(); // Call the `fund` function when fallback is triggered.
+    }
+
+    // Receive function that is triggered when the contract receives ETH without any data.
+    receive() external payable {
+        fund(); // Call the `fund` function when receive is triggered.
+    }
+}
+
